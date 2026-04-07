@@ -5,8 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 try:
     from app.orchestrator import run_pipeline
@@ -23,6 +24,19 @@ LOGS_DIR = BASE_DIR / "logs"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class SubmissionRequest(BaseModel):
+    submission_id: str
+    submitted_by: str
+    agent_name: str
+    agent_description: str
+    use_case: str
+    deployment_context: str
+    selected_frameworks: list[str] = Field(default_factory=list)
+    risk_focus: list[str] = Field(default_factory=list)
+    submitted_evidence: list[dict[str, str]] = Field(default_factory=list)
+    notes: str = ""
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -50,72 +64,38 @@ def root() -> dict[str, Any]:
 
 
 @app.post("/submit")
-async def submit_agent(
-    submission_id: str = Form(...),
-    submitted_by: str = Form(...),
-    agent_name: str = Form(...),
-    agent_description: str = Form(...),
-    use_case: str = Form(...),
-    deployment_context: str = Form(...),
-    selected_frameworks: str = Form(""),
-    risk_focus: str = Form(""),
-    notes: str = Form(""),
-    file: UploadFile | None = File(None),
-) -> JSONResponse:
+async def submit_agent(request: SubmissionRequest) -> JSONResponse:
     submission_timestamp = datetime.now(UTC).isoformat()
 
-    selected_frameworks_list = [
-        item.strip() for item in selected_frameworks.split(",") if item.strip()
-    ]
-    risk_focus_list = [
-        item.strip() for item in risk_focus.split(",") if item.strip()
-    ]
-
-    submission_artifact_dir = ARTIFACTS_DIR / submission_id
+    submission_artifact_dir = ARTIFACTS_DIR / request.submission_id
     submission_artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    submitted_evidence: list[dict[str, str]] = []
-
-    if file:
-        file_path = submission_artifact_dir / file.filename
-        content = await file.read()
-        file_path.write_bytes(content)
-
-        submitted_evidence.append(
-            {
-                "file_name": file.filename,
-                "file_type": file.content_type or "unknown",
-                "file_path": str(file_path),
-                "description": f"Uploaded file for submission {submission_id}",
-            }
-        )
-
     input_data = {
-        "submission_id": submission_id,
-        "submitted_by": submitted_by,
+        "submission_id": request.submission_id,
+        "submitted_by": request.submitted_by,
         "submission_timestamp": submission_timestamp,
-        "agent_name": agent_name,
-        "agent_description": agent_description,
-        "use_case": use_case,
-        "deployment_context": deployment_context,
-        "selected_frameworks": selected_frameworks_list,
-        "risk_focus": risk_focus_list,
-        "submitted_evidence": submitted_evidence,
-        "notes": notes,
+        "agent_name": request.agent_name,
+        "agent_description": request.agent_description,
+        "use_case": request.use_case,
+        "deployment_context": request.deployment_context,
+        "selected_frameworks": request.selected_frameworks,
+        "risk_focus": request.risk_focus,
+        "submitted_evidence": request.submitted_evidence,
+        "notes": request.notes,
     }
 
     results = run_pipeline(input_data)
 
-    submission_path = OUTPUTS_DIR / f"{submission_id}_submission.json"
+    submission_path = OUTPUTS_DIR / f"{request.submission_id}_submission.json"
     judge_output_paths = [
-        OUTPUTS_DIR / f"{submission_id}_judge1_output.json",
-        OUTPUTS_DIR / f"{submission_id}_judge2_output.json",
-        OUTPUTS_DIR / f"{submission_id}_judge3_output.json",
+        OUTPUTS_DIR / f"{request.submission_id}_judge1_output.json",
+        OUTPUTS_DIR / f"{request.submission_id}_judge2_output.json",
+        OUTPUTS_DIR / f"{request.submission_id}_judge3_output.json",
     ]
-    critique_round_path = OUTPUTS_DIR / f"{submission_id}_critique_round.json"
-    synthesis_path = OUTPUTS_DIR / f"{submission_id}_synthesis_output.json"
-    full_result_path = OUTPUTS_DIR / f"{submission_id}_full_result.json"
-    log_path = LOGS_DIR / f"{submission_id}_pipeline_log.json"
+    critique_round_path = OUTPUTS_DIR / f"{request.submission_id}_critique_round.json"
+    synthesis_path = OUTPUTS_DIR / f"{request.submission_id}_synthesis_output.json"
+    full_result_path = OUTPUTS_DIR / f"{request.submission_id}_full_result.json"
+    log_path = LOGS_DIR / f"{request.submission_id}_pipeline_log.json"
 
     _write_json(submission_path, input_data)
     for path, judge_output in zip(judge_output_paths, results["judge_outputs"], strict=True):
@@ -136,10 +116,10 @@ async def submit_agent(
 
     log_entry = {
         "timestamp": submission_timestamp,
-        "submission_id": submission_id,
+        "submission_id": request.submission_id,
         "status": "completed",
         "saved_artifact_dir": str(submission_artifact_dir),
-        "uploaded_files": [item["file_name"] for item in submitted_evidence],
+        "uploaded_files": [item["file_name"] for item in request.submitted_evidence],
         "generated_files": [
             Path(artifact_map["submission"]).name,
             *(Path(path).name for path in artifact_map["judge_outputs"]),

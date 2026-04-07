@@ -72,7 +72,7 @@ UNICC CAPSTONE/
 │   └── synthesis.py
 ├── demo.py
 ├── requirements.txt
-├── HANDOFF_README.md
+├── Makefile
 ├── outputs/
 ├── logs/
 └── artifacts/
@@ -108,7 +108,15 @@ ollama pull llama3.2:3b
 ollama serve
 ```
 
-### 4. Optional local API test
+### 4. Verify Ollama is running
+
+```text
+curl http://localhost:11434/api/tags
+```
+
+A JSON response listing available models confirms Ollama is up. If the request fails, re-run `ollama serve`.
+
+### 5. Optional local API test
 
 ```text
 curl http://localhost:11434/api/generate -d '{
