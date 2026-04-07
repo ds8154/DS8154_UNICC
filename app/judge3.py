@@ -17,6 +17,18 @@ try:
 except ModuleNotFoundError:
     from runtime_config import load_project_dotenv
 
+JUDGE_3_PROVIDER = os.environ.get("JUDGE_3_PROVIDER", "ollama")  # "ollama" | "gemini"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+if JUDGE_3_PROVIDER == "gemini" and not GEMINI_API_KEY:
+    import warnings
+    warnings.warn(
+        "JUDGE_3_PROVIDER=gemini but GEMINI_API_KEY is not set. "
+        "Judge 3 will return a fallback output.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+
 FRAMEWORK_ALIASES = {
     "eu ai act": "eu_ai_act",
     "eu_ai_act": "eu_ai_act",

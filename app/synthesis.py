@@ -81,6 +81,9 @@ class TopRisk(BaseModel):
 
     risk_name: str
     severity: Literal["Low", "Medium", "High", "Critical"]
+    description: str = ""
+    mitigation: str = ""
+    source_module: str = ""
 
 
 class SynthesisOutput(BaseModel):
@@ -150,17 +153,18 @@ def _agreement_status(results: list[ExpertJudgeOutput], critique_round: Critique
         )
 
     most_common_tier, most_common_count = tier_counts.most_common(1)[0]
+    all_disagreements = "; ".join(critique_round.disagreement_points)
     if most_common_count >= 2:
         return (
             "Partial Disagreement",
             f"Two of three judges align on a {most_common_tier} risk tier, but at least one judge diverges on severity or emphasis. "
-            + " ".join(critique_round.disagreement_points[:2]),
+            + all_disagreements,
         )
 
     return (
         "Major Disagreement",
         "The three-judge council produced materially different risk judgments across the technical, governance, and operational lenses. "
-        + " ".join(critique_round.disagreement_points[:2]),
+        + all_disagreements,
     )
 
 
@@ -169,7 +173,13 @@ def _collect_top_risks(results: list[ExpertJudgeOutput]) -> list[TopRisk]:
     for result in results:
         for risk in result.detected_risks:
             existing = unique.get(risk.risk_name)
-            current = TopRisk(risk_name=risk.risk_name, severity=risk.severity)
+            current = TopRisk(
+                risk_name=risk.risk_name,
+                severity=risk.severity,
+                description=risk.description,
+                mitigation=risk.mitigation,
+                source_module=result.module_name,
+            )
             if existing is None or SEVERITY_ORDER[current.severity] > SEVERITY_ORDER[existing.severity]:
                 unique[risk.risk_name] = current
     ordered = sorted(unique.values(), key=lambda item: SEVERITY_ORDER[item.severity], reverse=True)
@@ -180,7 +190,9 @@ def _next_actions(
     final_recommendation: str,
     critique_round: CritiqueRound,
     agreement_status: str,
+    top_risks: list[TopRisk] | None = None,
 ) -> list[str]:
+    risk_names = ", ".join(r.risk_name for r in (top_risks or [])[:2]) or "the flagged risks"
     actions: list[str] = []
     if final_recommendation == "Escalate for Human Review":
         actions.extend(
@@ -192,8 +204,8 @@ def _next_actions(
     elif final_recommendation == "Retest Required":
         actions.extend(
             [
-                "Address the highest-scoring findings across Judge 1, Judge 2, and Judge 3.",
-                "Rerun the full council review after remediation and evidence collection.",
+                f"Remediate the highest-severity findings: {risk_names}.",
+                "Rerun the full council review after providing updated evidence for each remediated risk.",
             ]
         )
     elif final_recommendation == "Pass with Conditions":
@@ -244,11 +256,15 @@ def run_synthesis(results: list[dict[str, Any]], critique_round: dict[str, Any] 
     runtime_error_present = any(result.error_flag for result in validated_results)
     agreement_status, disagreement_summary = _agreement_status(validated_results, validated_critique)
 
+    avg_confidence = sum(r.confidence for r in validated_results) / len(validated_results)
+
     if runtime_error_present or final_risk_tier == "Critical":
         final_recommendation: Literal["Pass", "Pass with Conditions", "Retest Required", "Escalate for Human Review"] = "Escalate for Human Review"
     elif final_risk_tier == "High":
         final_recommendation = "Retest Required"
     elif agreement_status == "Major Disagreement" or validated_critique.disagreement_points:
+        final_recommendation = "Pass with Conditions"
+    elif avg_confidence < 0.55:
         final_recommendation = "Pass with Conditions"
     else:
         final_recommendation = "Pass"
@@ -259,12 +275,18 @@ def run_synthesis(results: list[dict[str, Any]], critique_round: dict[str, Any] 
         tier_escalation_note = (
             f" The score-only synthesis lands at {score_based_tier}, but the final tier is held at {final_risk_tier} because at least one judge assigned the higher tier."
         )
+
+    output_top_risks = _collect_top_risks(validated_results)
+    top_risk_names = ", ".join(r.risk_name for r in output_top_risks[:2]) if output_top_risks else "none identified"
+    agent_name = validated_results[0].submission_id
+
     rationale = (
-        "The final synthesis blends all three validated judge scores with the council critique/arbitration round. "
+        f"For submission '{agent_name}': the final synthesis blends all three validated judge scores "
+        f"with the council critique round. "
         f"The critique reconciled the council at {validated_critique.reconciled_risk_score}/100 "
-        f"({validated_critique.reconciled_risk_tier}), while the confidence-weighted blended council score is {final_score}/100 "
-        f"({score_based_tier})."
-        f"{tier_escalation_note} "
+        f"({validated_critique.reconciled_risk_tier}); the confidence-weighted blended score is "
+        f"{final_score}/100 ({score_based_tier}).{tier_escalation_note} "
+        f"Highest-priority risks surfaced: {top_risk_names}. "
         + " ".join(validated_critique.arbitration_notes[:2])
     ).strip()
 
@@ -283,13 +305,16 @@ def run_synthesis(results: list[dict[str, Any]], critique_round: dict[str, Any] 
         ],
         agreement_status=agreement_status,  # type: ignore[arg-type]
         disagreement_summary=disagreement_summary,
-        top_risks=_collect_top_risks(validated_results),
+        top_risks=output_top_risks,
         final_risk_tier=final_risk_tier,
         final_recommendation=final_recommendation,
         rationale=rationale,
-        next_actions=_next_actions(final_recommendation, validated_critique, agreement_status),
+        next_actions=_next_actions(final_recommendation, validated_critique, agreement_status, output_top_risks),
         human_review_required=human_review_required,
-        audit_references=[result.raw_output_reference for result in validated_results],
+        audit_references=[
+            f"{r.module_name}@{r.module_version} | assessed {r.assessment_timestamp} | score={r.overall_risk_score} | tier={r.risk_tier}"
+            for r in validated_results
+        ],
         synthesis_version="v2.1-three-judge-arbitration",
     )
     return output.model_dump()

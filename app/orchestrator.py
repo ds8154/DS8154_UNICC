@@ -4,6 +4,7 @@ from collections import Counter
 from statistics import median
 from typing import Any, Literal
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 try:
@@ -111,22 +112,46 @@ TIER_ORDER = {
 }
 
 
-def _keywords_for_findings(findings: list[str]) -> set[str]:
+def _keywords_for_findings(findings: list[str], risk_focus: list[str] | None = None) -> set[str]:
     joined = " ".join(findings).lower()
-    topics = set()
+    topics: set[str] = set()
     keyword_map = {
-        "bias": ("bias", "fair", "discrimin"),
-        "privacy": ("privacy", "pii", "data", "sensitive"),
-        "transparency": ("transparency", "document", "explain", "disclosure"),
-        "misuse": ("jailbreak", "misuse", "harm", "attack"),
-        "compliance": ("compliance", "legal", "regulat", "governance", "policy"),
-        "security": ("prompt injection", "evasion", "backdoor", "poison", "security", "breach"),
-        "operations": ("oversight", "monitor", "audit", "owner", "deployment", "operational"),
+        "bias":           ("bias", "fair", "discrimin", "demographic"),
+        "privacy":        ("privacy", "pii", "data", "sensitive", "leak", "inference attack", "memoriz"),
+        "transparency":   ("transparency", "document", "explain", "disclosure", "model card"),
+        "misuse":         ("jailbreak", "misuse", "harm", "attack", "adversarial", "abuse", "exploit"),
+        "compliance":     ("compliance", "legal", "regulat", "governance", "policy", "gdpr", "eu ai act", "nist"),
+        "security":       ("prompt injection", "evasion", "backdoor", "poison", "security", "breach",
+                           "unauthenticated", "rate limit", "upload", "supply chain"),
+        "operations":     ("oversight", "monitor", "audit", "owner", "deployment", "operational",
+                           "transcription", "ffmpeg", "whisper", "fine-tun"),
+        "disinformation": ("disinformation", "misinformation", "deepfake", "media verif", "fact-check"),
     }
     for topic, patterns in keyword_map.items():
         if any(pattern in joined for pattern in patterns):
             topics.add(topic)
+    for focus_term in (risk_focus or []):
+        topics.add(focus_term.lower().strip())
     return topics
+
+
+def _enrich_evidence(normalized_input: dict[str, Any]) -> dict[str, Any]:
+    enriched = normalized_input.copy()
+    snippets: list[str] = []
+    for item in normalized_input.get("submitted_evidence", []):
+        desc = item.get("description", "")
+        ref = item.get("reference", item.get("file_name", ""))
+        if "github.com" in desc or "github.com" in ref:
+            url = next((w for w in (desc + " " + ref).split() if "github.com" in w), None)
+            if url:
+                try:
+                    r = httpx.get(url, timeout=10, follow_redirects=True)
+                    snippets.append(f"[Fetched {url}]\n{r.text[:3000]}")
+                except Exception:
+                    snippets.append(f"[Could not fetch {url}]")
+    if snippets:
+        enriched["notes"] = (normalized_input.get("notes", "") + "\n\n" + "\n\n".join(snippets)).strip()
+    return enriched
 
 
 def _risk_tier_from_score(score: int) -> Literal["Low", "Medium", "High", "Critical"]:
@@ -178,7 +203,7 @@ def _reconciled_score(results: list[ExpertJudgeOutput]) -> int:
     return int(round(weighted_average))
 
 
-def _critique_judges(judge_outputs: list[dict[str, Any]]) -> CritiqueRound:
+def _critique_judges(judge_outputs: list[dict[str, Any]], risk_focus: list[str] | None = None) -> CritiqueRound:
     validated_results = TypeAdapter(list[ExpertJudgeOutput]).validate_python(judge_outputs)
     agreement_points: list[str] = []
     disagreement_points: list[str] = []
@@ -208,7 +233,7 @@ def _critique_judges(judge_outputs: list[dict[str, Any]]) -> CritiqueRound:
 
     topic_counter: Counter[str] = Counter()
     for result in validated_results:
-        topic_counter.update(_keywords_for_findings(result.key_findings))
+        topic_counter.update(_keywords_for_findings(result.key_findings, risk_focus))
 
     shared_topics = sorted(topic for topic, count in topic_counter.items() if count >= 2)
     if shared_topics:
@@ -278,7 +303,7 @@ def _critique_judges(judge_outputs: list[dict[str, Any]]) -> CritiqueRound:
 
 def run_pipeline(input_data: dict[str, Any]) -> dict[str, Any]:
     validated_input = SubmissionInput.model_validate(input_data)
-    normalized_input = validated_input.model_dump()
+    normalized_input = _enrich_evidence(validated_input.model_dump())
 
     raw_outputs = [
         run_judge_1(normalized_input),
@@ -287,7 +312,10 @@ def run_pipeline(input_data: dict[str, Any]) -> dict[str, Any]:
     ]
     validated_outputs = TypeAdapter(list[ExpertJudgeOutput]).validate_python(raw_outputs)
 
-    critique_round = _critique_judges([result.model_dump() for result in validated_outputs])
+    critique_round = _critique_judges(
+        [result.model_dump() for result in validated_outputs],
+        risk_focus=normalized_input.get("risk_focus"),
+    )
     synthesis_output = run_synthesis(
         [result.model_dump() for result in validated_outputs],
         critique_round.model_dump(),

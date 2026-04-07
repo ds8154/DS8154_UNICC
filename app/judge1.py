@@ -309,6 +309,39 @@ def _severity_from_score(score: int) -> Literal["Low", "Medium", "High", "Critic
     return "Low"
 
 
+PROTOCOL_TO_FRAMEWORK: dict[str, tuple[str, str]] = {
+    "bias":          ("EU AI Act", "Art. 10 — Training data quality and bias"),
+    "transparency":  ("EU AI Act", "Art. 13 — Transparency and information provision"),
+    "explainability": ("US NIST AI RMF", "Govern 6.1 — Explainability requirements"),
+    "privacy_doc":   ("EU AI Act", "Art. 10 — Data governance and privacy-by-design"),
+    "evasion":       ("US NIST AI RMF", "Govern 1.1 — Adversarial input controls"),
+    "poison":        ("US NIST AI RMF", "Map 5.1 — Training data integrity"),
+    "privacy_inf":   ("EU AI Act", "Art. 10 / GDPR Art. 25 — PII inference controls"),
+    "redteam":       ("US NIST AI RMF", "Manage 2.2 — Red-team and misuse testing"),
+    "robustness":    ("IEEE 7001", "Transparency under noisy / edge-case inputs"),
+}
+
+
+def _build_policy_alignment(protocols: list[ProtocolAssessment]) -> list[PolicyAlignmentItem]:
+    items: list[PolicyAlignmentItem] = []
+    for p in protocols:
+        if p.protocol_id not in PROTOCOL_TO_FRAMEWORK:
+            continue
+        framework, note_template = PROTOCOL_TO_FRAMEWORK[p.protocol_id]
+        if p.outcome == "concern":
+            status = "Concern"
+        elif p.outcome == "needs_evidence":
+            status = "Needs Evidence"
+        else:
+            status = "Pass"
+        items.append(PolicyAlignmentItem(
+            framework=framework,
+            status=status,
+            note=f"{note_template}: {p.finding}",
+        ))
+    return items
+
+
 def _build_detected_risks(protocols: list[ProtocolAssessment]) -> list[DetectedRisk]:
     detected_risks: list[DetectedRisk] = []
     for protocol in sorted(protocols, key=lambda item: item.score, reverse=True):
@@ -400,7 +433,7 @@ def run_judge_1(input_data: dict[str, Any]) -> dict[str, Any]:
                 f"{len(normalized_protocols)} benchmark and adversarial protocols."
             ),
             evidence=_build_evidence(normalized_protocols),
-            policy_alignment=[],
+            policy_alignment=_build_policy_alignment(normalized_protocols),
             detected_risks=_build_detected_risks(normalized_protocols),
             recommended_action=_build_recommended_action(risk_tier, normalized_protocols, assessment.recommended_action),
             raw_output_reference=JUDGE_1_CONFIG.output_reference,

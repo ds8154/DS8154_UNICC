@@ -1,8 +1,9 @@
+import os
 import streamlit as st
 import requests
 from typing import Any, Dict, List
 
-BACKEND_URL = "http://127.0.0.1:8000/submit"
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000/submit")
 
 
 st.set_page_config(
@@ -40,7 +41,7 @@ def build_payload(
     selected_frameworks: str,
     risk_focus: str,
     notes: str,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     return {
         "submission_id": submission_id,
         "submitted_by": submitted_by,
@@ -48,14 +49,14 @@ def build_payload(
         "agent_description": agent_description,
         "use_case": use_case,
         "deployment_context": deployment_context,
-        "selected_frameworks": selected_frameworks,
-        "risk_focus": risk_focus,
+        "selected_frameworks": [f.strip() for f in selected_frameworks.split(",") if f.strip()],
+        "risk_focus": [f.strip() for f in risk_focus.split(",") if f.strip()],
         "notes": notes,
     }
 
 
-def call_backend(payload: Dict[str, str]) -> Dict[str, Any]:
-    response = requests.post(BACKEND_URL, data=payload, timeout=120)
+def call_backend(payload: Dict[str, Any]) -> Dict[str, Any]:
+    response = requests.post(BACKEND_URL, json=payload, timeout=120)
     response.raise_for_status()
     return response.json()
 
@@ -86,7 +87,7 @@ agent_description = st.text_area(
         "VeriMedia is a Flask-based media verification agent that uses GPT-4o as its backend LLM "
         "and OpenAI Whisper for audio/video transcription. It accepts unauthenticated file uploads "
         "via a public endpoint and processes multimedia content to detect disinformation. "
-        "GitHub: https://github.com/example/verimedia"
+        "GitHub: https://github.com/FlashCarrot/VeriMedia"
     ),
     height=180
 )
@@ -168,14 +169,20 @@ if st.button("Evaluate Safety", use_container_width=True):
         else:
             st.info(_msg)
 
-        metric_col1, metric_col2 = st.columns(2)
+        reconciled_score = critique_round.get("reconciled_risk_score", "N/A")
+
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
         with metric_col1:
             st.metric("Final Risk Tier", final_risk_tier)
         with metric_col2:
+            st.metric("Reconciled Score", f"{reconciled_score} / 100")
+        with metric_col3:
             st.metric(
                 "Human Review Required",
                 safe_text(synthesis_output.get("human_review_required"))
             )
+        if isinstance(reconciled_score, int):
+            st.progress(reconciled_score / 100)
 
         st.subheader("Rationale")
         st.write(safe_text(synthesis_output.get("rationale")))
@@ -213,6 +220,14 @@ if st.button("Evaluate Safety", use_container_width=True):
                         st.write("**Key Findings:**")
                         for finding in key_findings:
                             st.write(f"- {finding}")
+
+                    evidence_items = safe_list(judge.get("evidence"))
+                    if evidence_items:
+                        st.write("**Protocol Evidence:**")
+                        for ev in evidence_items:
+                            ref = ev.get("reference", "") if isinstance(ev, dict) else ""
+                            desc = ev.get("description", "") if isinstance(ev, dict) else str(ev)
+                            st.write(f"  - `{ref}`: {desc}")
 
                     error_flag = judge.get("error_flag", False)
                     st.write(f"**Error Flag:** {error_flag}")
@@ -280,8 +295,9 @@ if st.button("Evaluate Safety", use_container_width=True):
 
     except requests.exceptions.ConnectionError:
         st.error(
-            "Could not connect to the backend. Please make sure the backend is running at "
-            "http://127.0.0.1:8000"
+            "Could not connect to the backend at http://127.0.0.1:8000. "
+            "Start it with:\n\n"
+            "```\npython -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload\n```"
         )
     except requests.exceptions.Timeout:
         st.error("The backend request timed out.")
